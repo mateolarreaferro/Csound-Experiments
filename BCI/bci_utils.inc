@@ -4,7 +4,7 @@
 ; ==============================================================================
 
 ; ==============================================================================
-; OSC Listener with Fallback Macro (simplified for OpenBCI)
+; OSC Listener with Fallback Macros for different channel counts
 ; ==============================================================================
 #define OSC_LISTEN_8CH(handle'path'v1'v2'v3'v4'v5'v6'v7'v8) #
     kk OSClisten $handle, $path, "ffffffff", $v1, $v2, $v3, $v4, $v5, $v6, $v7, $v8
@@ -20,11 +20,60 @@
     endif
 #
 
+; 16-channel OSC listener macro for band power data (5 values per channel)
+#define OSC_LISTEN_5CH_BANDPOWER(handle'path'v1'v2'v3'v4'v5) #
+    kk OSClisten $handle, $path, "fffff", $v1, $v2, $v3, $v4, $v5
+    if kk == 0 then
+        $v1 = $v1 * 0.95 + 0.5 * 0.05
+        $v2 = $v2 * 0.95 + 0.5 * 0.05
+        $v3 = $v3 * 0.95 + 0.5 * 0.05
+        $v4 = $v4 * 0.95 + 0.5 * 0.05
+        $v5 = $v5 * 0.95 + 0.5 * 0.05
+    endif
+#
+
 ; ==============================================================================
 ; Value Scaling Macro - scales BCI values to useful ranges
 ; ==============================================================================
 #define SCALE_BCI_VALUE(input'min'max) #
     ($input * ($max - $min) + $min)
+#
+
+; ==============================================================================
+; 16-Channel BCI Global Variable Initialization
+; ==============================================================================
+#define INIT_16CH_BCI_GLOBALS(prefix) #
+    g$prefix.1 init 0.5
+    g$prefix.2 init 0.5
+    g$prefix.3 init 0.5
+    g$prefix.4 init 0.5
+    g$prefix.5 init 0.5
+    g$prefix.6 init 0.5
+    g$prefix.7 init 0.5
+    g$prefix.8 init 0.5
+    g$prefix.9 init 0.5
+    g$prefix.10 init 0.5
+    g$prefix.11 init 0.5
+    g$prefix.12 init 0.5
+    g$prefix.13 init 0.5
+    g$prefix.14 init 0.5
+    g$prefix.15 init 0.5
+    g$prefix.16 init 0.5
+#
+
+; ==============================================================================
+; Channel Averaging Macro - average multiple channels into fewer outputs
+; ==============================================================================
+#define AVERAGE_CHANNELS_4TO2(in1'in2'in3'in4'out1'out2) #
+    $out1 = ($in1 + $in2) * 0.5
+    $out2 = ($in3 + $in4) * 0.5
+#
+
+#define AVERAGE_CHANNELS_16TO4(in1'in2'in3'in4'in5'in6'in7'in8'in9'in10'in11'in12'in13'in14'in15'in16'out1'out2'out3'out4) #
+    $out1 = ($in1 + $in2 + $in3 + $in4) * 0.25
+    $out2 = ($in5 + $in6 + $in7 + $in8) * 0.25
+    $out3 = ($in9 + $in10 + $in11 + $in12) * 0.25
+    $out4 = ($in13 + $in14 + $in15 + $in16) * 0.25
 #
 
 ; ==============================================================================
