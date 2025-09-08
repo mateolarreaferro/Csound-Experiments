@@ -1,0 +1,108 @@
+# Unity generated files and folders
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]serSettings/
+
+# Unity Asset store tools
+[Aa]ssets/AssetStoreTools*
+
+# Unity Visual Studio cache directory
+.vs/
+
+# Unity solution files
+*.sln
+*.csproj
+*.unityproj
+
+# Unity 3D asset files
+*.unitypackage
+*.app
+
+# Unity timeline
+*.playable
+
+# Unity auto-generated meta files - KEEP essential meta files for scripts
+# Uncomment the following lines to exclude all .meta files if not needed
+# *.meta
+# !Assets/**/*.cs.meta
+# !Assets/**/*.shader.meta
+
+# Unity crash reports
+sysinfo.txt
+
+# Unity build reports
+*.buildreport
+
+# Unity editor state
+ProjectSettings/ProjectVersion.txt
+ProjectSettings/GraphicsSettings.asset
+
+# Python compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Python virtual environments
+.venv/
+.conda/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Python distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Temporary files
+*.tmp
+*.temp
