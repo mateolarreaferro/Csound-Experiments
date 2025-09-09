@@ -1,275 +1,196 @@
-# SSVEP BCI System
+# Basic SSVEP Prototype — OpenBCI Cyton + Daisy (16-channel)
 
-A modular Brain-Computer Interface system based on Steady-State Visual Evoked Potentials (SSVEP) for OpenBCI Cyton+Daisy (16 channels).
+A small, reliable SSVEP demo that runs in real time with OpenBCI Cyton + Daisy (16 channels, ~125 Hz). No novelty. Just what works.
 
-## Overview
+## Goals
 
-This system implements a real-time SSVEP-based BCI that detects which visual stimulus a user is focusing on by analyzing their EEG signals. SSVEP occurs when the brain synchronizes with flickering visual stimuli at specific frequencies.
+- 3–4 on-screen flicker targets
+- Real-time frequency selection using PSD/SNR
+- Stable selection after ~0.5–1.0 s fixation
 
-### Key Features
+## Hardware and Setup
 
-- **Real-time SSVEP Detection**: Multiple classification methods (CCA, FBCCA, PSDA)
-- **16-Channel Support**: Optimized for OpenBCI Cyton+Daisy board
-- **Flexible Stimulus Presentation**: Configurable frequencies (6-15 Hz) and layouts
-- **High Performance**: Precise frequency control with vsync support
-- **Modular Architecture**: Easy to extend and customize
-- **Multiple Classification Methods**: CCA, Filter Bank CCA, Power Spectral Density Analysis
-- **Real-time Processing**: Low-latency detection with configurable windows
-- **Comprehensive Metrics**: ITR, accuracy, SNR, and frequency-specific performance
+**Board**: OpenBCI Cyton + Daisy (16 channels, ~125 Hz)
 
-## Hardware Requirements
+**Reference/Bias**: SRB2 reference, BIAS to BIAS
 
-### OpenBCI Setup
-- OpenBCI Cyton + Daisy board (16 channels)
-- Wet or dry electrode EEG cap
-- 16 electrodes positioned according to 10-20 system:
-  - **Primary channels**: O1, O2, Oz (occipital - most important for SSVEP)
-  - **Secondary channels**: PO3, PO4, POz, P3, P4, Pz (parietal-occipital)
-  - **Additional channels**: CP1, CP2, Cz, FC1, FC2, P7, P8
-  - **Reference**: Earlobe or mastoid
-  - **Ground**: Opposite earlobe or forehead
+**Electrodes (recommended)**: O1, Oz, O2, PO3, POz, PO4, P3, Pz, P4 (use extra parietal/occipital sites as available)
 
-### Electrode Placement
-The system emphasizes occipital and parietal-occipital sites for optimal SSVEP detection, as visual cortex activity is strongest in these regions.
+**Display**: 60 Hz monitor, windowed or fullscreen with reliable vsync
 
-## Installation
+**Flicker frequencies (60 Hz friendly)**: 7.5, 10, 12, 15 Hz
 
-### From source
+Seat the participant ~60–80 cm from the screen. Keep cables still, minimize blinks and jaw movement during trials.
+
+## Project Structure
+
+```
+ssvep/
+  README.md
+  requirements.txt
+  config.py
+  run_stimulus.py          # Visual flicker UI (frame-locked)
+  run_ssvep.py             # Acquisition + real-time detection
+
+  src/
+    acquisition.py         # BrainFlow reader for Cyton+Daisy (16 ch)
+    filters.py             # Bandpass + notch
+    detector_psd.py        # Welch PSD + SNR scoring
+    utils.py               # Ring buffer and stable-vote helper
+    synthetic.py           # Simple synthetic generator (optional)
+```
+
+## Environment and Install
+
+**Python**: 3.10 or newer
+
+### Install
+
 ```bash
-git clone https://github.com/yourusername/ssvep-bci.git
-cd ssvep-bci
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# macOS/Linux:
+source .venv/bin/activate
+
 pip install -r requirements.txt
-pip install -e .
 ```
 
-## Quick Start
+If PsychoPy is heavy on the machine, Pygame can substitute, but PsychoPy gives better frame timing.
 
-### 1. Hardware Setup
-1. Connect your OpenBCI Cyton + Daisy board
-2. Apply EEG electrodes according to the 16-channel montage
-3. Verify electrode impedances are below 5 kΩ
+## Configuration
 
-### 2. Calibration
-Run calibration to collect training data:
+Edit `config.py` for your setup:
+
+```python
+BOARD_ID = "CYTON_DAISY"     # or "CYTON" if using 8-ch
+SERIAL_PORT = "COM5"         # e.g. COM5 on Windows, /dev/tty.usbserial-DMxxxx on macOS
+WINDOW_SEC = 2.0             # analysis window length
+STEP_SEC = 0.2               # hop size
+BANDPASS = (6.0, 45.0)       # Hz
+NOTCH = 60.0                 # set to 50.0 for 50 Hz regions
+FREQS = [7.5, 10.0, 12.0, 15.0]
+HARMONICS = 2                # 1 = fundamental only, 2 = add 2nd harmonic
+USE_CHANNELS = None          # None = use all EEG channels
+SNR_NEIGHBOR_BW = 1.0        # sidebands for noise floor (excludes ±0.3 Hz around peak)
+VOTE_HOLD_MS = 500           # must hold the top class this long before select
+LOGGING = True
+```
+
+**Notes**:
+- On macOS, SERIAL_PORT looks like `/dev/tty.usbserial-XXXX`
+- Sampling rate is read from BrainFlow at runtime. Expect ~125 Hz on Cyton + Daisy.
+
+## Run
+
+Start the visual stimulus in one terminal:
+
 ```bash
-python run_ssvep_calibration.py --port /dev/ttyUSB0 --trials 10
+python run_stimulus.py
 ```
 
-### 3. Online BCI
-Run the real-time SSVEP BCI:
+Start acquisition and detection in another terminal:
+
 ```bash
-python run_ssvep_online.py --port /dev/ttyUSB0 --model data/model_*.pkl
+python run_ssvep.py
 ```
 
-## System Architecture
+You should see logs like:
 
-### Core Modules
-
-#### Acquisition (`acquisition.py`)
-- Real-time EEG data streaming from OpenBCI Cyton+Daisy
-- Circular buffer for real-time access
-- Data recording in multiple formats (EDF, CSV, FIF)
-- Impedance estimation
-
-#### SSVEP Preprocessing (`ssvep_preprocessing.py`)
-- Bandpass filtering (3-45 Hz) for SSVEP frequencies
-- Notch filtering (50/60 Hz)
-- Spatial filtering (CAR, occipital emphasis)
-- Artifact rejection (threshold-based and ICA)
-- Frequency-specific filtering for each target
-
-#### SSVEP Classification (`ssvep_classifier.py`)
-- **CCA**: Canonical Correlation Analysis between EEG and reference signals
-- **FBCCA**: Filter Bank CCA with multiple frequency bands
-- **PSDA**: Power Spectral Density Analysis at target frequencies
-- **Ensemble**: Weighted combination of methods
-
-#### SSVEP Stimulus (`ssvep_stimulus.py`)
-- Precise frequency control (6.0, 7.5, 8.57, 10.0, 12.0, 15.0 Hz)
-- Multiple stimulus types (checkerboard, square, sinusoidal)
-- Real-time phase tracking
-- Pygame-based rendering with vsync support
-
-### Configuration
-
-Edit `ssvep_bci/config/settings.py` to customize:
-
-```python
-# Example key parameters
-STIMULUS = {
-    'frequencies': [6.0, 7.5, 8.57, 10.0, 12.0, 15.0],  # Hz
-    'n_targets': 6,
-    'stimulus_type': 'checkerboard',  # or 'square', 'sinusoidal'
-}
-
-CLASSIFIER = {
-    'type': 'CCA',  # or 'FBCCA', 'PSDA', 'ensemble'
-    'n_harmonics': 3,
-    'window_length': 4.0,  # seconds
-}
-
-REALTIME = {
-    'min_confidence': 0.6,
-    'decision_interval': 500,  # ms
-}
+```
+[INFO] Sampling rate: 125 Hz, EEG chans: 16
+Pred=10.0 SNR=2.45 :: 7.5:1.22 | 10.0:2.45 | 12.0:1.18 | 15.0:0.97
+[SELECT] 10.0 Hz
 ```
 
-## Usage Examples
+### Command Line Options
 
-### Python API
-
-```python
-from p300_speller.modules import CalibrationSession
-from p300_speller.config import settings
-
-# Run calibration
-session = CalibrationSession(settings.__dict__)
-session.run_calibration()
-
-# Load and use for spelling
-session.load_calibration('SESSION_ID')
+**Stimulus Options**:
+```bash
+python run_stimulus.py --freqs 7.5 10.0 12.0 15.0 --fullscreen
+python run_stimulus.py --test  # Test mode with simulated feedback
 ```
 
-### Advanced Configuration
+**Detection Options**:
+```bash
+# Use synthetic data for testing
+python run_ssvep.py --synthetic 10.0
 
-```python
-# Custom classifier settings
-config = settings.__dict__.copy()
-config['CLASSIFIER']['type'] = 'MDM'
-config['CLASSIFIER']['xdawn_components'] = 8
+# Real OpenBCI with custom settings  
+python run_ssvep.py --board CYTON_DAISY --port COM5 --window 2.5
 
-# Custom preprocessing
-config['PREPROCESSING']['bandpass'] = (0.5, 30)
-config['PREPROCESSING']['use_ica'] = True
+# Occipital channels only
+python run_ssvep.py --occipital-only
+
+# Custom channel selection (0-based indices)
+python run_ssvep.py --channels 0 1 2 7 8 9
 ```
 
-## Performance Optimization
+## Usage Tips
 
-### Hardware Considerations
-- Maintain electrode impedances below 5 kΩ
-- Use a stable, artifact-free recording environment
-- Ensure proper grounding and shielding
+- Place the flicker boxes far apart
+- Ask the participant to fixate on one box at a time
+- Keep the PsychoPy window in focus and vsync on
 
-### Algorithm Tuning
-- **xDAWN components**: Start with 6, increase for more channels
-- **Sequence count**: Balance speed vs accuracy (5-15 sequences)
-- **Flash timing**: 100ms flash, 75ms ISI works well for most users
-- **Stopping threshold**: 0.9 provides good speed/accuracy tradeoff
+## How It Works
 
-## Evaluation Metrics
+1. **Acquisition**: BrainFlow pulls 16-ch EEG from Cyton + Daisy
+2. **Preprocess**: Bandpass 6–45 Hz and 50/60 Hz notch
+3. **Detection**: Welch PSD averaged across selected channels. Compute SNR around fundamental and optional 2nd harmonic. Pick the highest SNR frequency.
+4. **Stability**: A small "hold" timer confirms the selection only if the same frequency stays on top for VOTE_HOLD_MS.
 
-The system provides comprehensive performance evaluation:
+## Electrode Montage (suggested)
 
-- **Character Accuracy**: Percentage of correctly identified characters
-- **Information Transfer Rate (ITR)**: Bits per minute accounting for accuracy and speed
-- **Typing Speed**: Characters per minute
-- **Selection Time**: Average time per character
-- **False Positive/Negative Rates**: Error analysis
-- **Confusion Matrix**: Per-character error patterns
+Back-of-head emphasis: O1, Oz, O2, PO3, POz, PO4, P3, Pz, P4
 
-## Extending the System
-
-### Adding New Classifiers
-
-```python
-from p300_speller.modules.classifier import BaseClassifier
-
-class MyClassifier(BaseClassifier):
-    def fit(self, X, y):
-        # Implementation
-        pass
-    
-    def predict(self, X):
-        # Implementation
-        pass
-```
-
-### Custom Feature Extraction
-
-```python
-class MyFeatures(BaseEstimator, TransformerMixin):
-    def fit(self, X, y=None):
-        return self
-    
-    def transform(self, X):
-        # Custom feature computation
-        return features
-```
-
-### New Stimulus Paradigms
-
-```python
-def my_paradigm(self):
-    # Define custom flash sequences
-    sequence = [['A', 'B'], ['C', 'D']]  # Example grouping
-    return sequence
-```
+Keep impedances low and stable. Use conductive gel or saline as appropriate.
 
 ## Troubleshooting
 
-### Common Issues
+### No detection or unstable output
 
-1. **No OpenBCI connection**
-   - Check serial port and permissions
-   - Verify board power and USB connection
+- Confirm printed sampling rate ~125 Hz
+- Verify SERIAL_PORT and that the dongle is paired
+- Increase WINDOW_SEC to 2.5–3.0 s and keep STEP_SEC at 0.2 s
+- Keep HARMONICS = 2, and ensure NOTCH matches mains power
+- Reduce channels to occipital/parietal if noisy
 
-2. **Poor classification accuracy**
-   - Check electrode impedances
-   - Increase calibration data
-   - Adjust preprocessing parameters
+### Stimulus timing issues
 
-3. **High artifact levels**
-   - Enable ICA preprocessing
-   - Improve electrode preparation
-   - Reduce environmental noise
+- Ensure monitor refresh is truly 60 Hz
+- Keep the PsychoPy window active. Avoid screen recording overlays
 
-### Debug Mode
-Enable verbose output:
+## Definition of Done
+
+- Real-time classification among 3–4 targets with visible logs of predicted frequency
+- Selection triggers after about 0.5–1.0 s of steady gaze
+- Runs for at least 5 minutes without crashing. Handles brief data dropouts
+- All main parameters are in config.py
+
+## Testing with Synthetic Data
+
+For quick validation without hardware:
+
 ```bash
-p300-calibrate --debug --dry-run  # Test without hardware
+# Test detection pipeline with synthetic 12 Hz SSVEP
+python run_ssvep.py --synthetic 12.0 --duration 30
+
+# Test individual components
+python src/detector_psd.py    # Test PSD detector
+python src/filters.py         # Test filters
+python src/synthetic.py       # Test synthetic data generation
 ```
 
-## Citation
+## Stretch Upgrades (optional, nice to have)
 
-If you use this software in your research, please cite:
+### Occipital-only switch
+Add a CLI flag `--occipital-only` that restricts channels to O1, Oz, O2, PO3, POz, PO4, Pz. ✅ Implemented
 
-```bibtex
-@software{p300_speller,
-  title={P300 Speller BCI System},
-  author={P300 BCI Development Team},
-  year={2024},
-  url={https://github.com/p300-bci/p300-speller}
-}
-```
+### Synthetic mode
+Add `python run_ssvep.py --synthetic 10.0` to bypass BrainFlow and feed synthetic.synth_ssvep(10.0, fs=125, dur=4, n_channels=8) through the pipeline for quick validation. ✅ Implemented
 
-## Contributing
+### CCA detector
+Implement a second detector that uses CCA with sin/cos reference signals over 1–2 s windows and a simple majority vote. Keep PSD as default. (Future work)
 
-We welcome contributions! Please see `CONTRIBUTING.md` for guidelines.
+## Safety
 
-### Development Setup
-```bash
-git clone https://github.com/p300-bci/p300-speller.git
-cd p300-speller
-pip install -e ".[dev]"
-pre-commit install
-```
-
-## License
-
-This project is licensed under the MIT License - see `LICENSE` file for details.
-
-## Acknowledgments
-
-- OpenBCI community for hardware support
-- MNE-Python developers for EEG processing tools
-- P300 BCI research community for foundational algorithms
-
-## Support
-
-- **Documentation**: https://p300-speller.readthedocs.io/
-- **Issues**: https://github.com/p300-bci/p300-speller/issues
-- **Discussions**: https://github.com/p300-bci/p300-speller/discussions
-
----
-
-**Note**: This is a research-grade system. For clinical applications, additional validation and regulatory approval may be required.
+This is a research prototype, not a medical device. Provide breaks, avoid excessive flicker exposure, and follow standard lab safety practices.
