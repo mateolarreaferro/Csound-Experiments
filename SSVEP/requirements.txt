@@ -10,20 +10,19 @@ matplotlib>=3.5.0
 
 # EEG/BCI hardware interface
 brainflow>=5.13.0
+pylsl>=1.16.0  # Lab Streaming Layer for OpenBCI GUI
+# Note: On macOS, LSL library must be installed first:
+#   brew install labstreaminglayer/tap/lsl
+#   python fix_lsl.py  # Copies library to venv
 
 # Visual stimulus presentation
-psychopy>=2023.1.0
-# Note: PsychoPy has many dependencies including:
-# - pygame (for simple graphics)
-# - pyglet (OpenGL interface)
-# - pillow (image processing)
-# - soundfile (audio support)
+pygame>=2.1.0  # Primary choice for simple graphics
 
-# GUI framework (required by PsychoPy)
-PyQt5>=5.15.0
-
-# Alternative lightweight dependencies for headless/minimal setup
-pygame>=2.1.0  # Alternative to PsychoPy for simple graphics
+# Optional: PsychoPy for advanced stimulus features
+# Note: PsychoPy has complex dependencies and may have installation issues
+# Uncomment the following lines if you need PsychoPy:
+# psychopy>=2023.1.0
+# PyQt5>=5.15.0
 
 # Development and testing (optional)
 pytest>=7.0.0
