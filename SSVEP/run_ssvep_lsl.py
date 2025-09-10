@@ -7,12 +7,24 @@ from pylsl import StreamInlet, resolve_streams
 from scipy import signal
 from scipy.signal import welch
 from collections import deque
+import os
+import sys
+
+# Add local src directory for utilities
+sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
+from utils import StableVoteFilter
 
 # SSVEP parameters
 TARGET_FREQS = [10.0, 15.0]  # Hz - matching binary stimulus
 HARMONICS = 2  # Include 2nd harmonic
 WINDOW_SEC = 2.0  # Analysis window
 UPDATE_RATE = 4  # Hz
+
+# Detection parameters
+SNR_THRESHOLD = 2.0        # Minimum SNR for a valid detection
+MARGIN_RATIO = 1.5         # Dominant frequency must exceed others by this ratio
+EMA_ALPHA = 0.3            # Exponential moving average smoothing
+HOLD_MS = 500              # Hold time for stable decisions
 
 class SSVEPDetectorLSL:
     def __init__(self):
@@ -21,6 +33,10 @@ class SSVEPDetectorLSL:
         self.n_channels = None
         self.buffer = deque(maxlen=int(250 * WINDOW_SEC))  # Assuming ~250Hz from GUI
         self.running = False
+        # Smoothed power estimates for stability
+        self.smoothed_powers = np.zeros(len(TARGET_FREQS))
+        # Stable decision filter
+        self.vote_filter = StableVoteFilter(hold_duration_ms=HOLD_MS)
         
     def connect_lsl(self):
         """Connect to LSL stream from OpenBCI GUI"""
@@ -124,31 +140,47 @@ class SSVEPDetectorLSL:
                 if time.time() - last_update > 1.0/UPDATE_RATE and len(self.buffer) >= self.fs * 0.5:
                     # Convert buffer to array
                     data = np.array(self.buffer).T  # Shape: (channels, samples)
-                    
+
                     # Compute SSVEP power for each frequency
                     powers = []
                     for freq in TARGET_FREQS:
                         power = self.compute_ssvep_power(data, freq, HARMONICS)
                         powers.append(power)
-                    
-                    # Determine selection with higher threshold
+
+                    # Smooth power estimates to reduce flicker
                     powers = np.array(powers)
-                    
-                    # Only select if one frequency is significantly stronger
-                    if np.max(powers) > 2.0 and np.max(powers) > np.min(powers) * 1.5:
-                        selection = np.argmax(powers)
-                        if selection == 0:
-                            selection_text = "→ LEFT (10 Hz) ←"
+                    self.smoothed_powers = (
+                        EMA_ALPHA * powers + (1 - EMA_ALPHA) * self.smoothed_powers
+                    )
+                    powers = self.smoothed_powers
+
+                    # Determine if any selection passes thresholds
+                    if np.max(powers) > SNR_THRESHOLD and np.max(powers) > np.min(powers) * MARGIN_RATIO:
+                        winner = int(np.argmax(powers))
+                        stable = self.vote_filter.update(winner)
+
+                        if stable is not None:
+                            if stable == 0:
+                                selection_text = "→ LEFT (10 Hz) ←"
+                            else:
+                                selection_text = "→ RIGHT (15 Hz) ←"
                         else:
-                            selection_text = "→ RIGHT (15 Hz) ←"
-                        
-                        # Print with power levels
-                        print(f"\r{selection_text:20s} | " +
-                              f"SNR 10Hz: {powers[0]:5.2f} | SNR 15Hz: {powers[1]:5.2f}    ", end='')
+                            if winner == 0:
+                                selection_text = "Candidate: LEFT"
+                            else:
+                                selection_text = "Candidate: RIGHT"
                     else:
-                        print(f"\r{'Looking...':20s} | " +
-                              f"SNR 10Hz: {powers[0]:5.2f} | SNR 15Hz: {powers[1]:5.2f}    ", end='')
-                    
+                        # No clear winner - reset vote filter
+                        self.vote_filter.reset()
+                        selection_text = "Looking..."
+
+                    # Print status with power levels
+                    print(
+                        f"\r{selection_text:20s} | "
+                        f"SNR 10Hz: {powers[0]:5.2f} | SNR 15Hz: {powers[1]:5.2f}    ",
+                        end="",
+                    )
+
                     last_update = time.time()
                     
             except KeyboardInterrupt:
