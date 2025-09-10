@@ -83,6 +83,9 @@ class IntegratedSSVEP:
         # Communication queue between threads
         self.detection_queue = queue.Queue()
         
+        # Calibration state
+        self.baseline_data = []
+        
         # Initialize Pygame
         pygame.init()
         
@@ -210,19 +213,84 @@ class IntegratedSSVEP:
         """Run calibration to optimize detection parameters"""
         logger.info("Starting calibration phase...")
         self.calibrating = True
+        self.calibration_step = 0
+        self.calibration_start_time = None
+        self.calibration_message = ""
         
-        # Collect baseline (no stimulus)
-        logger.info("Collecting baseline - please relax and look at center")
-        baseline_data = []
-        start_time = time.time()
+        # Steps: 0=baseline, 1=left freq, 2=right freq, 3=done
+        self.calibration_steps = [
+            {"message": "Relax and look at the center cross", "duration": 5, "freq_index": None},
+            {"message": f"Look at the LEFT box ({self.frequencies[0]}Hz)", "duration": 10, "freq_index": 0},
+            {"message": f"Look at the RIGHT box ({self.frequencies[1]}Hz)", "duration": 10, "freq_index": 1},
+        ]
         
-        while time.time() - start_time < 5.0:
-            chunk, _ = self.inlet.pull_chunk(timeout=0.0, max_samples=32)
-            if chunk:
-                baseline_data.extend(chunk)
+        self.start_calibration_step()
+    
+    def start_calibration_step(self):
+        """Start the current calibration step"""
+        if self.calibration_step >= len(self.calibration_steps):
+            self.finish_calibration()
+            return
         
-        if len(baseline_data) > self.fs:
-            baseline_array = np.array(baseline_data[-int(self.fs*2):]).T
+        step = self.calibration_steps[self.calibration_step]
+        self.calibration_message = step["message"]
+        self.calibration_start_time = time.time()
+        self.calibration_duration = step["duration"]
+        
+        logger.info(f"Calibration step {self.calibration_step + 1}: {self.calibration_message}")
+    
+    def update_calibration(self):
+        """Update calibration progress and collect data"""
+        if not self.calibrating or self.calibration_start_time is None:
+            return
+        
+        elapsed = time.time() - self.calibration_start_time
+        
+        # Collect data
+        chunk, _ = self.inlet.pull_chunk(timeout=0.0, max_samples=32)
+        if chunk:
+            if self.calibration_step == 0:  # Baseline
+                for sample in chunk:
+                    self.baseline_data.append(sample)
+            else:
+                for sample in chunk:
+                    self.buffer.append(sample)
+                
+                # Process for frequency-specific calibration
+                step = self.calibration_steps[self.calibration_step]
+                freq_index = step["freq_index"]
+                if freq_index is not None and len(self.buffer) >= self.fs * 1.5:
+                    data = np.array(self.buffer)
+                    if self.optimal_channels:
+                        data = data[:, self.optimal_channels].T
+                    else:
+                        data = data.T
+                    
+                    freq = self.frequencies[freq_index]
+                    snr = self.compute_ssvep_power(data, freq)
+                    self.calibration_data[freq].append(snr)
+        
+        # Check if step is complete
+        if elapsed >= self.calibration_duration:
+            if self.calibration_step == 0:
+                # Process baseline data
+                self.process_baseline()
+            
+            self.calibration_step += 1
+            if self.calibration_step < len(self.calibration_steps):
+                time.sleep(1)  # Short rest between steps
+                self.start_calibration_step()
+            else:
+                self.finish_calibration()
+    
+    def process_baseline(self):
+        """Process baseline data to find optimal channels and noise level"""
+        if not hasattr(self, 'baseline_data'):
+            self.baseline_data = []
+            return
+        
+        if len(self.baseline_data) > self.fs:
+            baseline_array = np.array(self.baseline_data[-int(self.fs*2):]).T
             
             # Find optimal channels
             self.find_optimal_channels(baseline_array)
@@ -234,38 +302,19 @@ class IntegratedSSVEP:
                     noise_levels.append(self.compute_ssvep_power(baseline_array, freq))
             self.baseline_noise = np.median(noise_levels)
             logger.info(f"Baseline noise level: {self.baseline_noise:.2f}")
-        
-        # Calibrate each frequency
-        for i, freq in enumerate(self.frequencies):
-            logger.info(f"Look at {self.labels[i]} ({freq}Hz) for 10 seconds...")
-            
-            calib_data = []
-            start_time = time.time()
-            
-            while time.time() - start_time < 10.0:
-                chunk, _ = self.inlet.pull_chunk(timeout=0.0, max_samples=32)
-                if chunk:
-                    for sample in chunk:
-                        self.buffer.append(sample)
-                
-                if len(self.buffer) >= self.fs * 1.5:
-                    data = np.array(self.buffer)
-                    if self.optimal_channels:
-                        data = data[:, self.optimal_channels].T
-                    else:
-                        data = data.T
-                    
-                    snr = self.compute_ssvep_power(data, freq)
-                    self.calibration_data[freq].append(snr)
-            
-            logger.info(f"Calibration for {freq}Hz complete")
-            time.sleep(2)  # Rest period
-        
+    
+    def finish_calibration(self):
+        """Complete calibration and calculate thresholds"""
         # Calculate personalized thresholds
         self.calculate_thresholds()
         
         self.calibrating = False
+        self.calibration_step = -1
         logger.info("Calibration complete!")
+        
+        # Clear baseline data to save memory
+        if hasattr(self, 'baseline_data'):
+            del self.baseline_data
     
     def calculate_thresholds(self):
         """Calculate personalized detection thresholds from calibration"""
@@ -382,18 +431,20 @@ class IntegratedSSVEP:
         self.screen.blit(text, text_rect)
         
         # Instructions
-        if not self.stimulating:
+        if not self.stimulating and not self.calibrating:
             instructions = [
                 "Press C to calibrate (recommended first)",
                 "Press SPACE to start stimulus",
                 "Press ESC to exit"
             ]
-        else:
+        elif self.stimulating:
             instructions = [
                 f"Look at a box to make selection",
                 f"Left: {self.frequencies[0]}Hz | Right: {self.frequencies[1]}Hz",
                 "Press SPACE to stop"
             ]
+        else:
+            instructions = []
         
         y_offset = 80
         for line in instructions:
@@ -401,6 +452,106 @@ class IntegratedSSVEP:
             text_rect = text.get_rect(centerx=self.window_size[0]//2, y=y_offset)
             self.screen.blit(text, text_rect)
             y_offset += 25
+    
+    def draw_calibration_interface(self):
+        """Draw calibration-specific interface"""
+        # Update calibration progress
+        self.update_calibration()
+        
+        if not hasattr(self, 'calibration_message'):
+            return
+        
+        # Clear screen with darker background
+        self.screen.fill((64, 64, 64))
+        
+        # Title
+        title = f"CALIBRATION - Step {self.calibration_step + 1} of {len(self.calibration_steps)}"
+        text = self.large_font.render(title, True, self.yellow)
+        text_rect = text.get_rect(centerx=self.window_size[0]//2, y=50)
+        self.screen.blit(text, text_rect)
+        
+        # Current instruction
+        instruction = self.calibration_message
+        text = self.font.render(instruction, True, self.white)
+        text_rect = text.get_rect(centerx=self.window_size[0]//2, y=150)
+        self.screen.blit(text, text_rect)
+        
+        # Progress bar
+        if hasattr(self, 'calibration_start_time') and self.calibration_start_time:
+            elapsed = time.time() - self.calibration_start_time
+            progress = min(1.0, elapsed / self.calibration_duration)
+            
+            bar_width = 400
+            bar_height = 20
+            bar_x = (self.window_size[0] - bar_width) // 2
+            bar_y = 200
+            
+            # Background
+            pygame.draw.rect(self.screen, self.black,
+                           (bar_x, bar_y, bar_width, bar_height))
+            
+            # Progress fill
+            fill_width = int(bar_width * progress)
+            pygame.draw.rect(self.screen, self.green,
+                           (bar_x, bar_y, fill_width, bar_height))
+            
+            # Border
+            pygame.draw.rect(self.screen, self.white,
+                           (bar_x, bar_y, bar_width, bar_height), 2)
+            
+            # Time remaining
+            remaining = max(0, self.calibration_duration - elapsed)
+            time_text = f"Time remaining: {remaining:.1f}s"
+            text = self.small_font.render(time_text, True, self.white)
+            text_rect = text.get_rect(centerx=self.window_size[0]//2, y=bar_y + 30)
+            self.screen.blit(text, text_rect)
+        
+        # Visual cues based on calibration step
+        if self.calibration_step == 0:  # Baseline - show center cross
+            cross_size = 30
+            center_x, center_y = self.window_size[0]//2, self.window_size[1]//2
+            
+            # Draw cross
+            pygame.draw.line(self.screen, self.white,
+                           (center_x - cross_size, center_y),
+                           (center_x + cross_size, center_y), 4)
+            pygame.draw.line(self.screen, self.white,
+                           (center_x, center_y - cross_size),
+                           (center_x, center_y + cross_size), 4)
+        
+        elif self.calibration_step > 0:  # Show boxes with highlighting
+            # Draw both boxes but highlight the target
+            for i, (pos, label) in enumerate([(self.left_pos, self.labels[0]),
+                                              (self.right_pos, self.labels[1])]):
+                if i == self.calibration_steps[self.calibration_step]["freq_index"]:
+                    # Highlight target box
+                    color = self.yellow
+                    border_color = self.red
+                    border_width = 6
+                else:
+                    # Normal box
+                    color = (100, 100, 100)
+                    border_color = self.white
+                    border_width = 2
+                
+                pygame.draw.rect(self.screen, color,
+                               (pos[0], pos[1], self.box_size, self.box_size))
+                pygame.draw.rect(self.screen, border_color,
+                               (pos[0], pos[1], self.box_size, self.box_size), border_width)
+                
+                # Label
+                text = self.font.render(label, True, self.white)
+                text_rect = text.get_rect(centerx=pos[0] + self.box_size//2,
+                                          bottom=pos[1] - 20)
+                self.screen.blit(text, text_rect)
+            
+            # Show frequency for target box
+            target_freq = self.frequencies[self.calibration_steps[self.calibration_step]["freq_index"]]
+            freq_text = f"Focus on {target_freq}Hz stimulus"
+            text = self.font.render(freq_text, True, self.yellow)
+            text_rect = text.get_rect(centerx=self.window_size[0]//2,
+                                      bottom=self.window_size[1] - 50)
+            self.screen.blit(text, text_rect)
     
     def draw_boxes(self, left_color, right_color):
         """Draw flickering boxes with selection feedback"""
@@ -567,10 +718,7 @@ class IntegratedSSVEP:
                                 logger.info("Stimulus stopped")
                     elif event.key == pygame.K_c:
                         if not self.stimulating:
-                            # Run calibration in separate thread
-                            calib_thread = threading.Thread(target=self.calibration_phase)
-                            calib_thread.daemon = True
-                            calib_thread.start()
+                            self.calibration_phase()
             
             # Draw interface
             self.draw_interface()
@@ -585,11 +733,7 @@ class IntegratedSSVEP:
             
             # Calibration display
             if self.calibrating:
-                calib_text = "Please follow the on-screen instructions"
-                text = self.font.render(calib_text, True, self.yellow)
-                text_rect = text.get_rect(centerx=self.window_size[0]//2,
-                                         centery=self.window_size[1]//2)
-                self.screen.blit(text, text_rect)
+                self.draw_calibration_interface()
             
             # Update display
             pygame.display.flip()
