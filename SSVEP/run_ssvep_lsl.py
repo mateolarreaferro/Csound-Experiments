@@ -60,35 +60,43 @@ class SSVEPDetectorLSL:
         sos = signal.butter(4, [5, 45], btype='band', fs=self.fs, output='sos')
         filtered = signal.sosfiltfilt(sos, data, axis=1)
         
-        # Compute PSD
-        nperseg = min(len(filtered[0]), int(self.fs * 1))  # 1 second window
-        freqs, psd = welch(filtered, fs=self.fs, nperseg=nperseg, axis=1)
+        # Apply 60Hz notch filter for power line noise
+        notch_sos = signal.butter(2, [59, 61], btype='bandstop', fs=self.fs, output='sos')
+        filtered = signal.sosfiltfilt(notch_sos, filtered, axis=1)
         
-        # Average across channels (use occipital if possible)
-        # Channels 1-3 are typically O1, O2, Oz in OpenBCI GUI
-        if self.n_channels >= 3:
-            psd_mean = np.mean(psd[:3, :], axis=0)  # Use first 3 channels
+        # Compute PSD with longer window for better frequency resolution
+        nperseg = min(len(filtered[0]), int(self.fs * 2))  # 2 second window
+        freqs, psd = welch(filtered, fs=self.fs, nperseg=nperseg, noverlap=nperseg//2, axis=1)
+        
+        # Use occipital channels (typically channels 7-9 for O1, O2, Oz in 16-channel setup)
+        # OpenBCI channel mapping: 1-8 are frontal/central, 9-16 are parietal/occipital
+        if self.n_channels >= 16:
+            # Use channels 8-10 (indices 7-9) for occipital region
+            psd_mean = np.mean(psd[7:10, :], axis=0)
+        elif self.n_channels >= 8:
+            # Use last 3 channels
+            psd_mean = np.mean(psd[-3:, :], axis=0)
         else:
             psd_mean = np.mean(psd, axis=0)
         
-        # Calculate power at target frequency and harmonics
-        total_power = 0
-        for h in range(1, harmonics + 1):
-            target_hz = freq * h
-            idx = np.argmin(np.abs(freqs - target_hz))
-            
-            # Get power in narrow band around target
-            band_idx = np.where((freqs >= target_hz - 0.5) & (freqs <= target_hz + 0.5))[0]
-            if len(band_idx) > 0:
-                total_power += np.max(psd_mean[band_idx])
+        # Calculate power at target frequency
+        target_idx = np.argmin(np.abs(freqs - freq))
+        signal_power = psd_mean[target_idx]
         
-        # Calculate SNR
-        noise_idx = np.where((freqs >= freq - 3) & (freqs <= freq + 3))[0]
-        if len(noise_idx) > 0:
-            noise_power = np.median(psd_mean[noise_idx])
-            snr = total_power / (noise_power + 1e-10)
+        # Add harmonic if significant
+        if harmonics >= 2:
+            harmonic_idx = np.argmin(np.abs(freqs - freq * 2))
+            if harmonic_idx < len(psd_mean):
+                signal_power += 0.3 * psd_mean[harmonic_idx]  # Weight harmonic less
+        
+        # Calculate noise as median of surrounding frequencies
+        noise_band = np.where((freqs >= freq - 2) & (freqs <= freq + 2) & 
+                              (np.abs(freqs - freq) > 0.5))[0]
+        if len(noise_band) > 0:
+            noise_power = np.median(psd_mean[noise_band])
+            snr = signal_power / (noise_power + 1e-10)
         else:
-            snr = total_power
+            snr = signal_power
         
         return snr
     
@@ -123,21 +131,23 @@ class SSVEPDetectorLSL:
                         power = self.compute_ssvep_power(data, freq, HARMONICS)
                         powers.append(power)
                     
-                    # Determine selection
+                    # Determine selection with higher threshold
                     powers = np.array(powers)
-                    if np.max(powers) > 1.5:  # SNR threshold
+                    
+                    # Only select if one frequency is significantly stronger
+                    if np.max(powers) > 2.0 and np.max(powers) > np.min(powers) * 1.5:
                         selection = np.argmax(powers)
                         if selection == 0:
-                            selection_text = "LEFT (10 Hz)"
+                            selection_text = "→ LEFT (10 Hz) ←"
                         else:
-                            selection_text = "RIGHT (15 Hz)"
+                            selection_text = "→ RIGHT (15 Hz) ←"
                         
                         # Print with power levels
-                        print(f"\rSelection: {selection_text} | " +
-                              f"10Hz: {powers[0]:.2f} | 15Hz: {powers[1]:.2f}    ", end='')
+                        print(f"\r{selection_text:20s} | " +
+                              f"SNR 10Hz: {powers[0]:5.2f} | SNR 15Hz: {powers[1]:5.2f}    ", end='')
                     else:
-                        print(f"\rNo clear selection | " +
-                              f"10Hz: {powers[0]:.2f} | 15Hz: {powers[1]:.2f}    ", end='')
+                        print(f"\r{'Looking...':20s} | " +
+                              f"SNR 10Hz: {powers[0]:5.2f} | SNR 15Hz: {powers[1]:5.2f}    ", end='')
                     
                     last_update = time.time()
                     
