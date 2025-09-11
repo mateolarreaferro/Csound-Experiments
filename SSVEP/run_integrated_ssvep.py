@@ -17,6 +17,7 @@ import logging
 # Add local src directory
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 from utils import StableVoteFilter
+from ssvep_bci.modules.ssvep_classifier import SSVEPClassifier
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -40,7 +41,7 @@ class IntegratedSSVEP:
         
         # Visual elements
         self.box_size = 250
-        self.separation = 400
+        self.separation = 500  # Increased separation for clearer targets
         
         # Colors
         self.bg_color = (128, 128, 128)
@@ -58,16 +59,16 @@ class IntegratedSSVEP:
         self.buffer = deque(maxlen=500)  # Will be resized after connection
         
         # Detection parameters
-        self.snr_threshold = 2.0
-        self.margin_ratio = 1.5
+        self.snr_threshold = 0.35  # Threshold for FBCCA scores
+        self.margin_ratio = 1.15
         self.ema_alpha = 0.3
         self.hold_ms = 500
-        
-        # Calibration data
-        self.calibration_data = {freq: [] for freq in self.frequencies}
+
+        # Calibration and training data
+        self.training_data = {freq: [] for freq in self.frequencies}
         self.baseline_noise = None
         self.optimal_channels = None
-        self.personalized_thresholds = None
+        self.classifier = None
         
         # State management
         self.running = False
@@ -134,10 +135,24 @@ class IntegratedSSVEP:
         
         logger.info(f"Connected to LSL stream: {info.name()}")
         logger.info(f"Sampling rate: {self.fs} Hz, Channels: {self.n_channels}")
-        
+
         # Update buffer size
         self.buffer = deque(maxlen=int(self.fs * WINDOW_SEC))
-        
+
+        # Initialize FBCCA classifier
+        config = {
+            'HARDWARE': {'sampling_rate': self.fs},
+            'STIMULUS': {'frequencies': self.frequencies},
+            'CLASSIFIER': {
+                'type': 'FBCCA',
+                'n_harmonics': HARMONICS,
+                'filter_bank': {'enabled': True, 'n_filters': 5, 'filter_order': 4},
+                'window_length': WINDOW_SEC,
+                'threshold': self.snr_threshold,
+            }
+        }
+        self.classifier = SSVEPClassifier(config)
+
         return True
     
     def find_optimal_channels(self, data):
@@ -216,12 +231,16 @@ class IntegratedSSVEP:
         self.calibration_step = 0
         self.calibration_start_time = None
         self.calibration_message = ""
+
+        # Reset data containers
+        self.training_data = {freq: [] for freq in self.frequencies}
+        self.buffer.clear()
         
-        # Steps: 0=baseline, 1=left freq, 2=right freq, 3=done
+        # Steps: 0=baseline, 1=left freq, 2=right freq
         self.calibration_steps = [
-            {"message": "Relax and look at the center cross", "duration": 5, "freq_index": None},
-            {"message": f"Look at the LEFT box ({self.frequencies[0]}Hz)", "duration": 10, "freq_index": 0},
-            {"message": f"Look at the RIGHT box ({self.frequencies[1]}Hz)", "duration": 10, "freq_index": 1},
+            {"message": "Relax and look at the center cross", "duration": 10, "freq_index": None},
+            {"message": f"Look at the LEFT box ({self.frequencies[0]}Hz)", "duration": 15, "freq_index": 0},
+            {"message": f"Look at the RIGHT box ({self.frequencies[1]}Hz)", "duration": 15, "freq_index": 1},
         ]
         
         self.start_calibration_step()
@@ -255,27 +274,28 @@ class IntegratedSSVEP:
             else:
                 for sample in chunk:
                     self.buffer.append(sample)
-                
-                # Process for frequency-specific calibration
-                step = self.calibration_steps[self.calibration_step]
-                freq_index = step["freq_index"]
-                if freq_index is not None and len(self.buffer) >= self.fs * 1.5:
-                    data = np.array(self.buffer)
-                    if self.optimal_channels:
-                        data = data[:, self.optimal_channels].T
-                    else:
-                        data = data.T
-                    
-                    freq = self.frequencies[freq_index]
-                    snr = self.compute_ssvep_power(data, freq)
-                    self.calibration_data[freq].append(snr)
         
         # Check if step is complete
         if elapsed >= self.calibration_duration:
+            step = self.calibration_steps[self.calibration_step]
+            freq_index = step["freq_index"]
+
             if self.calibration_step == 0:
                 # Process baseline data
                 self.process_baseline()
-            
+            else:
+                # Store training segments for this frequency
+                data = np.array(self.buffer).T  # channels x samples
+                if self.optimal_channels:
+                    data = data[self.optimal_channels, :]
+
+                window_samples = int(self.fs * WINDOW_SEC)
+                for i in range(0, data.shape[1] - window_samples + 1, window_samples):
+                    segment = data[:, i:i+window_samples]
+                    self.training_data[self.frequencies[freq_index]].append(segment)
+
+            self.buffer.clear()
+
             self.calibration_step += 1
             if self.calibration_step < len(self.calibration_steps):
                 time.sleep(1)  # Short rest between steps
@@ -304,43 +324,30 @@ class IntegratedSSVEP:
             logger.info(f"Baseline noise level: {self.baseline_noise:.2f}")
     
     def finish_calibration(self):
-        """Complete calibration and calculate thresholds"""
-        # Calculate personalized thresholds
-        self.calculate_thresholds()
-        
+        """Complete calibration by training classifier and setting thresholds"""
+        if self.classifier and any(self.training_data.values()):
+            self.classifier.train(self.training_data)
+            self.calculate_thresholds()
+
         self.calibrating = False
         self.calibration_step = -1
         logger.info("Calibration complete!")
-        
+
         # Clear baseline data to save memory
         if hasattr(self, 'baseline_data'):
             del self.baseline_data
-    
+
     def calculate_thresholds(self):
-        """Calculate personalized detection thresholds from calibration"""
-        if not any(self.calibration_data.values()):
-            return
-        
-        # Calculate statistics for each frequency
-        stats = {}
-        for freq in self.frequencies:
-            if self.calibration_data[freq]:
-                data = np.array(self.calibration_data[freq])
-                stats[freq] = {
-                    'mean': np.mean(data),
-                    'std': np.std(data),
-                    'max': np.max(data),
-                    'p75': np.percentile(data, 75)
-                }
-        
-        # Set adaptive thresholds
-        if stats:
-            min_snr = min(s['p75'] for s in stats.values())
-            self.snr_threshold = max(1.5, min_snr * 0.7)  # 70% of weakest response
-            
-            logger.info(f"Personalized SNR threshold: {self.snr_threshold:.2f}")
-            for freq, stat in stats.items():
-                logger.info(f"{freq}Hz - Mean: {stat['mean']:.2f}, Max: {stat['max']:.2f}")
+        """Calculate detection threshold from calibration scores"""
+        scores = []
+        for freq, segments in self.training_data.items():
+            for seg in segments:
+                features = self.classifier.extract_features(seg)
+                scores.append(features.get(freq, 0))
+
+        if scores:
+            self.snr_threshold = max(0.2, np.percentile(scores, 50))
+            logger.info(f"Adaptive score threshold: {self.snr_threshold:.2f}")
     
     def detection_thread(self):
         """Background thread for SSVEP detection"""
@@ -356,49 +363,48 @@ class IntegratedSSVEP:
                         self.buffer.append(sample)
                 
                 # Process at UPDATE_RATE
-                if (time.time() - last_update > 1.0/UPDATE_RATE and 
-                    len(self.buffer) >= self.fs * 0.5 and 
+                if (time.time() - last_update > 1.0/UPDATE_RATE and
+                    len(self.buffer) >= self.fs * WINDOW_SEC and
                     self.stimulating):
-                    
+
                     # Convert buffer to array
                     data = np.array(self.buffer)
-                    
+
                     # Use optimal channels if available
                     if self.optimal_channels:
                         data = data[:, self.optimal_channels].T
                     else:
                         data = data.T
-                    
-                    # Compute power for each frequency
-                    powers = []
-                    for freq in self.frequencies:
-                        power = self.compute_ssvep_power(data, freq)
-                        powers.append(power)
-                    
+
+                    # Extract FBCCA features
+                    features = self.classifier.extract_features(data)
+                    scores = np.array([features.get(freq, 0) for freq in self.frequencies])
+
                     # Smooth estimates
-                    powers = np.array(powers)
                     self.smoothed_powers = (
-                        self.ema_alpha * powers + 
+                        self.ema_alpha * scores +
                         (1 - self.ema_alpha) * self.smoothed_powers
                     )
-                    powers = self.smoothed_powers
-                    
+                    scores = self.smoothed_powers
+
                     # Detection logic
-                    if (np.max(powers) > self.snr_threshold and 
-                        np.max(powers) > np.min(powers) * self.margin_ratio):
-                        
-                        winner = int(np.argmax(powers))
-                        stable = self.vote_filter.update(winner)
-                        
-                        # Calculate confidence
-                        self.confidence = (powers[winner] - self.snr_threshold) / self.snr_threshold
-                        self.confidence = min(1.0, self.confidence)
-                        
+                    max_idx = int(np.argmax(scores))
+                    max_score = scores[max_idx]
+                    second_best = np.partition(scores, -2)[-2] if len(scores) > 1 else 0
+
+                    if (max_score > self.snr_threshold and
+                        max_score > second_best * self.margin_ratio):
+
+                        stable = self.vote_filter.update(max_idx)
+
+                        # Confidence directly from score
+                        self.confidence = max_score
+
                         # Send detection result
                         self.detection_queue.put({
                             'selection': stable,
-                            'candidate': winner,
-                            'powers': powers.copy(),
+                            'candidate': max_idx,
+                            'powers': scores.copy(),
                             'confidence': self.confidence
                         })
                     else:
@@ -406,10 +412,10 @@ class IntegratedSSVEP:
                         self.detection_queue.put({
                             'selection': None,
                             'candidate': None,
-                            'powers': powers.copy(),
+                            'powers': scores.copy(),
                             'confidence': 0.0
                         })
-                    
+
                     last_update = time.time()
                     
             except Exception as e:
@@ -651,11 +657,11 @@ class IntegratedSSVEP:
             pygame.draw.rect(self.screen, self.white,
                            (bar_x, bar_y, bar_width, bar_height), 2)
         
-        # SNR display
+        # Score display
         if detection and detection.get('powers') is not None:
             powers = detection['powers']
             for i, (freq, power) in enumerate(zip(self.frequencies, powers)):
-                text = f"{freq}Hz SNR: {power:.2f}"
+                text = f"{freq}Hz score: {power:.2f}"
                 color = self.green if power > self.snr_threshold else self.white
                 snr_text = self.small_font.render(text, True, color)
                 snr_rect = snr_text.get_rect(x=20, y=self.window_size[1] - 100 + i*25)
